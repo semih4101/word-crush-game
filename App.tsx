@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
   Alert,
+  GestureResponderEvent,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -9,21 +10,55 @@ import {
   Text,
   TextInput,
   View,
+  LayoutAnimation,
+  Platform,
+  UIManager,
 } from 'react-native';
+
+if (
+  Platform.OS === 'android' &&
+  UIManager.setLayoutAnimationEnabledExperimental
+) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
+
+const FallAnimation = {
+  duration: 400,
+  create: {
+    type: LayoutAnimation.Types.spring,
+    property: LayoutAnimation.Properties.scaleXY,
+    springDamping: 0.6,
+  },
+  update: {
+    type: LayoutAnimation.Types.spring,
+    springDamping: 0.6,
+  },
+  delete: {
+    type: LayoutAnimation.Types.easeOut,
+    property: LayoutAnimation.Properties.opacity,
+    duration: 200,
+  },
+};
+
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const STORAGE_KEY = 'word-crush-player-name';
 const HISTORY_STORAGE_KEY = 'word-crush-game-history';
+const GOLD_STORAGE_KEY = 'word-crush-gold';
+const INVENTORY_STORAGE_KEY = 'word-crush-inventory';
 
 type Screen = 'home' | 'newGame' | 'scoreTable' | 'market' | 'game';
 type GridOption = {
   label: string;
-  level: string;
-  moves: number;
   size: number;
+};
+type MoveOption = {
+  label: string;
+  moves: number;
 };
 
 type GameCell = {
+  id: string;
   row: number;
   col: number;
   letter: string;
@@ -37,6 +72,8 @@ type JokerItem = {
   name: string;
   cost: number;
   description: string;
+  purpose: string;
+  usage: string;
   icon?: string;
 };
 
@@ -63,28 +100,36 @@ const POWER_SYMBOLS: Record<string, string> = {
   'mega': '✪',
 };
 
-const WORD_DICTIONARY = new Set([
-  'soru', 'kedi', 'masa', 'oyun', 'harf', 'ses', 'yol', 'kale', 'ana', 'kumaş', 'kelime',
-  'kitap', 'kalem', 'defter', 'kağıt', 'taş', 'su', 'ateş', 'rüzgar', 'yer', 'göğ',
-  'güneş', 'ay', 'yıldız', 'kırmızı', 'mavi', 'yeşil', 'sarı', 'beyaz', 'siyah',
-  'köpek', 'kuş', 'balık', 'at', 'gemi', 'uçak', 'araba', 'tren', 'ev', 'şehir',
-  'dağ', 'deniz', 'nehir', 'göl', 'orman', 'ağaç', 'yaprak', 'çiçek', 'elma', 'portakal',
-  'ekmek', 'çorba', 'yemek', 'kahve', 'çay', 'süt', 'peynir', 'yoğurt', 'et', 'tavuk',
-  'başlangıç', 'bitiş', 'skor', 'puan', 'hamle', 'kazanmak', 'kaybetmek', 'bilgisayar',
-  'telefon', 'tablet', 'ekran', 'tuş', 'yazıcı', 'tarayıcı', 'kare', 'daire', 'üçgen',
-  'dikdörtgen', 'kenar', 'köşe', 'açı', 'bir', 'iki', 'üç', 'dört', 'beş', 'altı',
-  'yedi', 'sekiz', 'dokuz', 'on', 'yüz', 'ağır', 'hafif', 'yüksek', 'alçak', 'geniş',
-  'dar', 'uzun', 'kısa', 'kalın', 'ince', 'sert', 'yumuşak', 'sıcak', 'soğuk', 'ılık',
-  'güzel', 'çirkin', 'iyi', 'kötü', 'büyük', 'küçük', 'yeni', 'eski', 'temiz', 'kirli',
-  'hızlı', 'yavaş', 'açık', 'kapalı', 'dolu', 'boş', 'geç', 'erken', 'sabah', 'akşam',
-  'gece', 'gün', 'hafta', 'ay', 'yıl', 'pazartesi', 'salı', 'çarşamba', 'perşembe',
-  'cuma', 'cumartesi', 'pazar', 'ocak', 'şubat', 'mart', 'nisan', 'mayıs', 'haziran',
-  'temmuz', 'ağustos', 'eylül', 'ekim', 'kasım', 'aralık', 'anne', 'baba', 'kız',
-  'oğlan', 'erkek', 'kadın', 'çocuk', 'genç', 'yaşlı', 'doktor', 'öğretmen', 'mühendis',
-  'mutlu', 'üzgün', 'öfkeli', 'korkulan', 'utangaç', 'cesur', 'aktif', 'pasif', 'akıllı',
-  'aptal', 'alımlı', 'canını', 'dost', 'düşman', 'sevgi', 'nefret', 'korku', 'umut',
-  'başarı', 'başarısızlık', 'çalışma', 'dinlenme', 'uyku', 'uyanış', 'yeme', 'içme',
-]);
+import { WORD_DICTIONARY_ARRAY } from './dictionary';
+
+class TrieNode {
+  children: Record<string, TrieNode> = {};
+  isWord: boolean = false;
+}
+
+class Trie {
+  root: TrieNode = new TrieNode();
+
+  insert(word: string) {
+    let node = this.root;
+    for (const char of word) {
+      if (!node.children[char]) {
+        node.children[char] = new TrieNode();
+      }
+      node = node.children[char];
+    }
+    node.isWord = true;
+  }
+}
+
+const wordTrie = new Trie();
+const WORD_DICTIONARY = new Set<string>();
+for (const word of WORD_DICTIONARY_ARRAY) {
+  const normalized = word.toLocaleLowerCase('tr-TR');
+  wordTrie.insert(normalized);
+  WORD_DICTIONARY.add(normalized);
+}
+
 
 const LETTER_POINTS: Record<string, number> = {
   A: 1,
@@ -123,9 +168,15 @@ function randomLetter() {
 }
 
 const GRID_OPTIONS: GridOption[] = [
-  { label: '6x6 Grid', level: 'Zor Seviye', moves: 15, size: 6 },
-  { label: '8x8 Grid', level: 'Orta Seviye', moves: 20, size: 8 },
-  { label: '10x10 Grid', level: 'Kolay Seviye', moves: 25, size: 10 },
+  { label: '6x6 Grid', size: 6 },
+  { label: '8x8 Grid', size: 8 },
+  { label: '10x10 Grid', size: 10 },
+];
+
+const MOVE_OPTIONS: MoveOption[] = [
+  { label: 'Kolay Level (25 Hamle)', moves: 25 },
+  { label: 'Orta Level (20 Hamle)', moves: 20 },
+  { label: 'Zor Level (15 Hamle)', moves: 15 },
 ];
 
 const LETTER_POOL = [
@@ -162,6 +213,7 @@ const LETTER_POOL = [
 function createBoard(size: number) {
   return Array.from({ length: size }, (_, row) =>
     Array.from({ length: size }, (_, col) => ({
+      id: Math.random().toString(36).substring(2, 10),
       row,
       col,
       letter: randomLetter(),
@@ -178,21 +230,25 @@ function findAllValidWords(board: GameCell[][]): string[] {
     row: number,
     col: number,
     visited: Set<string>,
+    node: TrieNode,
     currentWord: string,
   ) => {
     const cellKey = `${row}-${col}`;
     if (visited.has(cellKey)) return;
 
     const cell = board[row][col];
+    const letter = cell.letter.toLocaleLowerCase('tr-TR');
+    
+    if (!node.children[letter]) return;
+    
+    const nextNode = node.children[letter];
     const nextWord = currentWord + cell.letter;
-    visited.add(cellKey);
-
-    if (nextWord.length >= 3) {
-      const normalized = nextWord.toLocaleLowerCase('tr-TR');
-      if (WORD_DICTIONARY.has(normalized)) {
-        foundWords.add(normalized);
-      }
+    
+    if (nextNode.isWord && nextWord.length >= 3) {
+      foundWords.add(nextWord.toLocaleLowerCase('tr-TR'));
     }
+
+    visited.add(cellKey);
 
     if (nextWord.length < 10) {
       for (let dr = -1; dr <= 1; dr += 1) {
@@ -201,7 +257,7 @@ function findAllValidWords(board: GameCell[][]): string[] {
           const nr = row + dr;
           const nc = col + dc;
           if (nr >= 0 && nr < size && nc >= 0 && nc < size) {
-            dfs(nr, nc, visited, nextWord);
+            dfs(nr, nc, visited, nextNode, nextWord);
           }
         }
       }
@@ -212,50 +268,50 @@ function findAllValidWords(board: GameCell[][]): string[] {
 
   for (let row = 0; row < size; row += 1) {
     for (let col = 0; col < size; col += 1) {
-      dfs(row, col, new Set<string>(), '');
+      dfs(row, col, new Set<string>(), wordTrie.root, '');
     }
   }
 
   return Array.from(foundWords);
 }
 
-function hasValidWords(board: GameCell[][]): boolean {
+function countNonOverlappingWords(board: GameCell[][]): number {
   const size = board.length;
-  let foundWord = false;
+  const usedCells = new Set<string>();
+  let count = 0;
 
   const dfs = (
     row: number,
     col: number,
     visited: Set<string>,
-    currentWord: string,
+    node: TrieNode,
+    currentPath: string[],
   ): boolean => {
-    if (foundWord) return true;
-    
     const cellKey = `${row}-${col}`;
-    if (visited.has(cellKey)) return false;
+    if (visited.has(cellKey) || usedCells.has(cellKey)) return false;
 
     const cell = board[row][col];
-    const nextWord = currentWord + cell.letter;
+    const letter = cell.letter.toLocaleLowerCase('tr-TR');
+    
+    if (!node.children[letter]) return false;
+    
+    const nextNode = node.children[letter];
+    const newPath = [...currentPath, cellKey];
     visited.add(cellKey);
 
-    if (nextWord.length >= 3) {
-      const normalized = nextWord.toLocaleLowerCase('tr-TR');
-      if (WORD_DICTIONARY.has(normalized)) {
-        foundWord = true;
-        visited.delete(cellKey);
-        return true;
-      }
+    if (nextNode.isWord && newPath.length >= 3) {
+      newPath.forEach((k) => usedCells.add(k));
+      return true;
     }
 
-    if (nextWord.length < 10) {
+    if (newPath.length < 10) {
       for (let dr = -1; dr <= 1; dr += 1) {
         for (let dc = -1; dc <= 1; dc += 1) {
           if (dr === 0 && dc === 0) continue;
           const nr = row + dr;
           const nc = col + dc;
           if (nr >= 0 && nr < size && nc >= 0 && nc < size) {
-            if (dfs(nr, nc, visited, nextWord)) {
-              visited.delete(cellKey);
+            if (dfs(nr, nc, visited, nextNode, newPath)) {
               return true;
             }
           }
@@ -269,9 +325,69 @@ function hasValidWords(board: GameCell[][]): boolean {
 
   for (let row = 0; row < size; row += 1) {
     for (let col = 0; col < size; col += 1) {
-      if (dfs(row, col, new Set<string>(), '')) {
-        return true;
+      if (!usedCells.has(`${row}-${col}`)) {
+        if (dfs(row, col, new Set<string>(), wordTrie.root, [])) {
+          count += 1;
+        }
       }
+    }
+  }
+
+  return count;
+}
+
+
+function hasValidWords(board: GameCell[][]): boolean {
+  const size = board.length;
+  let found = false;
+
+  const dfs = (
+    row: number,
+    col: number,
+    visited: Set<string>,
+    node: TrieNode,
+    currentWord: string,
+  ) => {
+    if (found) return;
+    const cellKey = `${row}-${col}`;
+    if (visited.has(cellKey)) return;
+
+    const cell = board[row][col];
+    const letter = cell.letter.toLocaleLowerCase('tr-TR');
+    
+    if (!node.children[letter]) return;
+    
+    const nextNode = node.children[letter];
+    const nextWord = currentWord + cell.letter;
+    
+    if (nextNode.isWord && nextWord.length >= 3) {
+      found = true;
+      return;
+    }
+
+    visited.add(cellKey);
+
+    if (nextWord.length < 10) {
+      for (let dr = -1; dr <= 1; dr += 1) {
+        for (let dc = -1; dc <= 1; dc += 1) {
+          if (dr === 0 && dc === 0) continue;
+          const nr = row + dr;
+          const nc = col + dc;
+          if (nr >= 0 && nr < size && nc >= 0 && nc < size) {
+            dfs(nr, nc, visited, nextNode, nextWord);
+            if (found) return;
+          }
+        }
+      }
+    }
+
+    visited.delete(cellKey);
+  };
+
+  for (let row = 0; row < size; row += 1) {
+    for (let col = 0; col < size; col += 1) {
+      dfs(row, col, new Set<string>(), wordTrie.root, '');
+      if (found) return true;
     }
   }
 
@@ -279,9 +395,11 @@ function hasValidWords(board: GameCell[][]): boolean {
 }
 
 function ensureBoardHasWords(size: number): GameCell[][] {
-  console.log('[ensureBoardHasWords] Creating board without word validation (for dev speed)');
-  // TODO: re-enable word validation once findAllValidWords is optimized
-  return createBoard(size);
+  let board = createBoard(size);
+  while (!hasValidWords(board)) {
+    board = createBoard(size);
+  }
+  return board;
 }
 
 function getPowerTypeForWordLength(length: number): 'row-clear' | 'bomb' | 'column-clear' | 'mega' | null {
@@ -338,25 +456,30 @@ function collapseBoard(board: GameCell[][], removedCells: GameCell[]) {
   const removedCellKeys = new Set(removedCells.map(cellKey));
 
   const rebuiltColumns = Array.from({ length: size }, (_, col) => {
-    const keptLetters: string[] = [];
+    const keptCells: { id: string; letter: string; powerType: GameCell['powerType'] }[] = [];
 
     for (let row = 0; row < size; row += 1) {
       const cell = board[row][col];
       if (!removedCellKeys.has(cellKey(cell))) {
-        keptLetters.push(cell.letter);
+        keptCells.push({ id: cell.id, letter: cell.letter, powerType: cell.powerType });
       }
     }
 
-    const newLetters = Array.from({ length: size - keptLetters.length }, () => randomLetter());
-    return [...newLetters, ...keptLetters];
+    const newCells = Array.from({ length: size - keptCells.length }, () => ({
+      id: Math.random().toString(36).substring(2, 10),
+      letter: randomLetter(),
+      powerType: null as GameCell['powerType'],
+    }));
+    return [...newCells, ...keptCells];
   });
 
   return Array.from({ length: size }, (_, row) =>
     Array.from({ length: size }, (_, col) => ({
+      id: rebuiltColumns[col][row].id,
       row,
       col,
-      letter: rebuiltColumns[col][row],
-      powerType: null,
+      letter: rebuiltColumns[col][row].letter,
+      powerType: rebuiltColumns[col][row].powerType,
     })),
   );
 }
@@ -369,27 +492,16 @@ function findCombos(word: string): string[] {
   const normalized = word.toLocaleLowerCase('tr-TR');
   const combos = new Set<string>();
 
-  const generateSubsequences = (
-    str: string,
-    index: number,
-    current: string,
-  ) => {
-    if (current.length >= 3) {
-      if (WORD_DICTIONARY.has(current)) {
+  for (let i = 0; i < normalized.length; i += 1) {
+    let current = '';
+    for (let j = i; j < normalized.length; j += 1) {
+      current += normalized[j];
+      if (current.length >= 3 && WORD_DICTIONARY.has(current)) {
         combos.add(current);
       }
     }
+  }
 
-    if (index >= str.length) {
-      return;
-    }
-
-    for (let i = index; i < str.length; i += 1) {
-      generateSubsequences(str, i + 1, current + str[i]);
-    }
-  };
-
-  generateSubsequences(normalized, 0, '');
   return Array.from(combos);
 }
 
@@ -487,36 +599,54 @@ const JOKER_ITEMS: JokerItem[] = [
     name: 'Balık',
     cost: 100,
     description: 'Gridde rastgele harfler yok etmektedir.',
+    purpose: 'Alan açmak',
+    usage: 'Seçildiğinde rastgele 5 harfi anında yok eder.',
+    icon: '🐟',
   },
   {
     id: 'tekerlek',
     name: 'Tekerlek',
     cost: 200,
     description: 'Gridde seçilen harfin bulunduğu satır ve sütundaki tüm harfler yok olmaktadır.',
+    purpose: 'Geniş alan temizliği',
+    usage: 'Seçtiğiniz harfin satırını ve sütununu tamamen temizler.',
+    icon: '🎡',
   },
   {
     id: 'lolipop',
     name: 'Lolipop Kırıcı',
     cost: 75,
     description: 'Gridde seçilen bir harf yok etmek için kullanılmaktadır.',
+    purpose: 'Nokta atışı',
+    usage: 'Seçtiğiniz tek bir harfi yok eder.',
+    icon: '🍭',
   },
   {
     id: 'değiştirme',
     name: 'Serbest Değiştirme',
     cost: 125,
     description: 'Gridde birbirine temas eden iki harfin yer değiştirilmesini sağlamaktadır.',
+    purpose: 'Stratejik konumlandırma',
+    usage: 'Önce birinci harfi, sonra komşusu olan ikinci harfi seçin.',
+    icon: '🔄',
   },
   {
     id: 'karıştırma',
     name: 'Harf Karıştırma',
     cost: 300,
     description: 'Gridde bulunan harflerin rastgele bir şekilde karıştırılmasını sağlamaktadır.',
+    purpose: 'Tıkanıklığı açmak',
+    usage: 'Seçildiğinde tüm harfler rastgele yer değiştirir.',
+    icon: '🔀',
   },
   {
     id: 'parti',
     name: 'Parti Güçlendiricisi',
     cost: 400,
-    description: 'Gridde bulunan tüm harfler yok edilir ve tekrardan rastgele harflar eklenir.',
+    description: 'Gridde bulunan tüm harfler yok edilir ve tekrardan rastgele harfler eklenir.',
+    purpose: 'Tamamen sıfırlama',
+    usage: 'Seçildiğinde tahtadaki tüm harfler yenilenir.',
+    icon: '🎉',
   },
 ];
 
@@ -528,13 +658,21 @@ function buildScoreSummary(records: SavedGameRecord[]) {
   const longestWord = records.reduce((longest, record) => (record.longestWord.length > longest.length ? record.longestWord : longest), '');
   const totalDuration = records.reduce((sum, record) => sum + Number(record.duration.replace(/\D/g, '')) || 0, 0);
 
+  const formatDuration = (mins: number) => {
+    if (mins === 0) return '0 dk';
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    if (h > 0) return m > 0 ? `${h} saat ${m} dk` : `${h} saat`;
+    return `${m} dk`;
+  };
+
   return [
     { label: 'Toplam Oyun', value: String(totalGames) },
     { label: 'En Yüksek Puan', value: String(highestScore) },
     { label: 'Ortalama Puan', value: String(averageScore) },
     { label: 'Toplam Kelime', value: String(totalWords) },
-    { label: 'En Uzun Kelime', value: longestWord || '-' },
-    { label: 'Toplam Süre', value: totalDuration > 0 ? `${totalDuration} dk` : '0 dk' },
+    { label: 'En Uzun Kelime', value: longestWord ? `"${longestWord}"` : '-' },
+    { label: 'Toplam Süre', value: formatDuration(totalDuration) },
   ];
 }
 
@@ -545,7 +683,8 @@ export default function App() {
   const [gameHistory, setGameHistory] = useState<SavedGameRecord[]>([]);
   const [screen, setScreen] = useState<Screen>('home');
   const [selectedGrid, setSelectedGrid] = useState<GridOption | null>(null);
-  const [gold, setGold] = useState(1500);
+  const [selectedMoves, setSelectedMoves] = useState<MoveOption | null>(null);
+  const [gold, setGold] = useState(10000);
   const [jokerInventory, setJokerInventory] = useState<JokerInventory>({
     balık: 0,
     tekerlek: 0,
@@ -559,6 +698,8 @@ export default function App() {
     const loadInitialData = async () => {
       const storedName = await AsyncStorage.getItem(STORAGE_KEY);
       const storedHistory = await AsyncStorage.getItem(HISTORY_STORAGE_KEY);
+      const storedGold = await AsyncStorage.getItem(GOLD_STORAGE_KEY);
+      const storedInventory = await AsyncStorage.getItem(INVENTORY_STORAGE_KEY);
 
       if (storedName) {
         setPlayerName(storedName);
@@ -570,6 +711,16 @@ export default function App() {
         } catch {
           setGameHistory([]);
         }
+      }
+
+      if (storedGold !== null) {
+        setGold(Number(storedGold));
+      }
+
+      if (storedInventory) {
+        try {
+          setJokerInventory(JSON.parse(storedInventory) as JokerInventory);
+        } catch {}
       }
 
       setIsReady(true);
@@ -608,6 +759,7 @@ export default function App() {
     setGameHistory(nextHistory);
     await AsyncStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(nextHistory));
     setSelectedGrid(null);
+    setSelectedMoves(null);
     setScreen('scoreTable');
   };
 
@@ -616,9 +768,9 @@ export default function App() {
       if (!selectedGrid) {
         return (
           <View style={styles.menuCard}>
-            <Text style={styles.menuTitle}>Yeni Oyun</Text>
+            <Text style={styles.menuTitle}>Grid Boyutu Seçimi</Text>
             <Text style={styles.screenDescription}>
-              Önce grid boyutunu seç.
+              Önce oynamak istediğin oyun alanının boyutunu seç.
             </Text>
 
             {GRID_OPTIONS.map((option) => (
@@ -628,9 +780,6 @@ export default function App() {
                 onPress={() => setSelectedGrid(option)}
               >
                 <Text style={styles.menuButtonText}>{option.label}</Text>
-                <Text style={styles.menuButtonSubtext}>
-                  {option.level} · {option.moves} hamle
-                </Text>
               </Pressable>
             ))}
 
@@ -641,15 +790,33 @@ export default function App() {
         );
       }
 
-      return (
-        <MenuScreen
-          title="Hamle Seçimi"
-          description={`${selectedGrid.label} için önerilen hamle sayısı ${selectedGrid.moves}. Bu seçimle oyun başlatılacak.`}
-          actionLabel="Oyuna Başla"
-          onAction={() => setScreen('game')}
-          onBack={() => setSelectedGrid(null)}
-        />
-      );
+      if (!selectedMoves) {
+        return (
+          <View style={styles.menuCard}>
+            <Text style={styles.menuTitle}>Hamle Sayısı Seçimi</Text>
+            <Text style={styles.screenDescription}>
+              Oyunun zorluk seviyesini (hamle sayısını) belirle.
+            </Text>
+
+            {MOVE_OPTIONS.map((option) => (
+              <Pressable
+                key={option.label}
+                style={styles.menuButton}
+                onPress={() => {
+                  setSelectedMoves(option);
+                  setScreen('game');
+                }}
+              >
+                <Text style={styles.menuButtonText}>{option.label}</Text>
+              </Pressable>
+            ))}
+
+            <Pressable style={styles.secondaryButton} onPress={() => setSelectedGrid(null)}>
+              <Text style={styles.secondaryButtonText}>Geri Dön</Text>
+            </Pressable>
+          </View>
+        );
+      }
     }
 
     if (screen === 'scoreTable') {
@@ -680,7 +847,7 @@ export default function App() {
                 <Text style={styles.historyLine}>Grid: {game.grid}</Text>
                 <Text style={styles.historyLine}>Puan: {game.score}</Text>
                 <Text style={styles.historyLine}>Kelime Sayısı: {game.wordCount}</Text>
-                <Text style={styles.historyLine}>En Uzun Kelime: {game.longestWord}</Text>
+                <Text style={styles.historyLine}>En Uzun Kelime: {game.longestWord !== '-' ? `"${game.longestWord}"` : '-'}</Text>
                 <Text style={styles.historyLine}>Süre: {game.duration}</Text>
               </View>
             ))}
@@ -714,19 +881,29 @@ export default function App() {
 
               return (
                 <View key={item.id} style={styles.historyCard}>
-                  <Text style={styles.historyTitle}>{item.name}</Text>
-                  <Text style={styles.historyLine}>{item.description}</Text>
+                  <Text style={styles.historyTitle}>{item.icon} {item.name}</Text>
+                  <Text style={styles.historyLine}>Özellik: {item.description}</Text>
+                  <Text style={styles.historyLine}>Amaç: {item.purpose}</Text>
+                  <Text style={styles.historyLine}>Kullanım: {item.usage}</Text>
                   <Text style={styles.historyLine}>Maliyet: {item.cost} altın</Text>
                   <Text style={styles.historyLine}>Sahip Olduğun: {owned}</Text>
                   <Pressable
                     style={[styles.primaryButton, !canBuy && styles.disabledButton]}
                     onPress={() => {
                       if (canBuy) {
-                        setGold((g) => g - item.cost);
-                        setJokerInventory((inv) => ({
-                          ...inv,
-                          [item.id]: inv[item.id as JokerType] + 1,
-                        }));
+                        setGold((g) => {
+                          const nextGold = g - item.cost;
+                          AsyncStorage.setItem(GOLD_STORAGE_KEY, String(nextGold));
+                          return nextGold;
+                        });
+                        setJokerInventory((inv) => {
+                          const nextInv = {
+                            ...inv,
+                            [item.id]: inv[item.id as JokerType] + 1,
+                          };
+                          AsyncStorage.setItem(INVENTORY_STORAGE_KEY, JSON.stringify(nextInv));
+                          return nextInv;
+                        });
                       }
                     }}
                     disabled={!canBuy}
@@ -747,14 +924,16 @@ export default function App() {
       );
     }
 
-    if (screen === 'game' && selectedGrid) {
+    if (screen === 'game' && selectedGrid && selectedMoves) {
       return (
         <GameScreen
           gridOption={selectedGrid}
+          moveOption={selectedMoves}
           jokerInventory={jokerInventory}
           setJokerInventory={setJokerInventory}
           onBack={() => {
             setSelectedGrid(null);
+            setSelectedMoves(null);
             setScreen('home');
           }}
           onFinish={saveGameRecord}
@@ -870,12 +1049,14 @@ function MenuScreen({
 
 function GameScreen({
   gridOption,
+  moveOption,
   jokerInventory,
   setJokerInventory,
   onBack,
   onFinish,
 }: {
   gridOption: GridOption;
+  moveOption: MoveOption;
   jokerInventory: JokerInventory;
   setJokerInventory: (inv: JokerInventory | ((prev: JokerInventory) => JokerInventory)) => void;
   onBack: () => void;
@@ -886,30 +1067,35 @@ function GameScreen({
     return newBoard;
   });
   
+  const [explodingCellKeys, setExplodingCellKeys] = useState<Set<string>>(new Set());
+  const isAnimatingRef = useRef(false);
+
   const [selectedCells, setSelectedCells] = useState<GameCell[]>([]);
-  const [remainingMoves, setRemainingMoves] = useState(gridOption.moves);
+  const [remainingMoves, setRemainingMoves] = useState(moveOption.moves);
   const [score, setScore] = useState(0);
   const [wordCount, setWordCount] = useState(0);
   const [longestWord, setLongestWord] = useState('');
-    const [validWordCount, setValidWordCount] = useState(0);
-    const [message, setMessage] = useState('Bir kelime oluşturmak için komşu harfleri seç.');
-    const [activeJoker, setActiveJoker] = useState<JokerType | null>(null);
-    const [jokerTarget, setJokerTarget] = useState<GameCell | null>(null);
-    const startedAtRef = useRef(Date.now());
-    const isFinishedRef = useRef(false);
+  const [validWordCount, setValidWordCount] = useState(0);
+  const [message, setMessage] = useState('Bir kelime oluşturmak için komşu harfleri seç.');
+  const [activeJoker, setActiveJoker] = useState<JokerType | null>(null);
+  const [jokerTarget, setJokerTarget] = useState<GameCell | null>(null);
+  const [gridWidth, setGridWidth] = useState(0);
+  const [scrollEnabled, setScrollEnabled] = useState(true);
+  const startedAtRef = useRef(Date.now());
+  const isFinishedRef = useRef(false);
 
   useEffect(() => {
-    // TODO: optimize findAllValidWords before re-enabling
-    // const count = findAllValidWords(board).length;
-    // setValidWordCount(count);
-    setValidWordCount(0); // Disabled for dev speed
-
-    // if (count === 0 && !isFinishedRef.current) {
-    //   const newBoard = ensureBoardHasWords(gridOption.size);
-    //   setBoard(newBoard);
-    //   setValidWordCount(findAllValidWords(newBoard).length);
-    // }
-  }, [board, gridOption.size]);
+    const disjointCount = countNonOverlappingWords(board);
+    setValidWordCount(disjointCount);
+    
+    if (disjointCount === 0 && !isFinishedRef.current && remainingMoves > 0) {
+      setMessage('Kelime kalmadı, tahta yeniden üretiliyor...');
+      setTimeout(() => {
+        const newBoard = ensureBoardHasWords(gridOption.size);
+        setBoard(newBoard);
+      }, 1000);
+    }
+  }, [board, gridOption.size, remainingMoves]);
 
   const selectedCellKeys = new Set(selectedCells.map(cellKey));
   const selectedWord = selectedCells.map((cell) => cell.letter).join('');
@@ -946,6 +1132,7 @@ function GameScreen({
           allCells.push(board[row][col]);
         }
       }
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setBoard((currentBoard) => {
         const shuffledBoard = [...currentBoard];
         const letters = shuffledBoard.flat().map((c) => c.letter);
@@ -962,7 +1149,12 @@ function GameScreen({
         }
         return shuffledBoard;
       });
-      setMessage('Harflar karıştırıldı!');
+      setMessage('Harfler karıştırıldı!');
+      setJokerInventory((inv: JokerInventory) => {
+        const nextInv = { ...inv, [activeJoker as JokerType]: inv[activeJoker as JokerType] - 1 };
+        AsyncStorage.setItem('word-crush-inventory', JSON.stringify(nextInv));
+        return nextInv;
+      });
       setActiveJoker(null);
       return;
     } else if (activeJoker === 'parti') {
@@ -973,14 +1165,27 @@ function GameScreen({
       }
     } else if (activeJoker === 'değiştirme') {
       if (jokerTarget) {
+        if (!areAdjacent(jokerTarget, cell)) {
+          setMessage('Sadece birbirine temas eden harfler yer değiştirebilir.');
+          return;
+        }
         setBoard((currentBoard) => {
           const newBoard = currentBoard.map((r) => [...r]);
-          const temp = newBoard[jokerTarget.row][jokerTarget.col].letter;
+          const tempLetter = newBoard[jokerTarget.row][jokerTarget.col].letter;
+          const tempPower = newBoard[jokerTarget.row][jokerTarget.col].powerType;
           newBoard[jokerTarget.row][jokerTarget.col].letter = newBoard[cell.row][cell.col].letter;
-          newBoard[cell.row][cell.col].letter = temp;
+          newBoard[jokerTarget.row][jokerTarget.col].powerType = newBoard[cell.row][cell.col].powerType;
+          newBoard[cell.row][cell.col].letter = tempLetter;
+          newBoard[cell.row][cell.col].powerType = tempPower;
           return newBoard;
         });
-        setMessage('Harflar değiştirildi!');
+        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+        setMessage('Harfler değiştirildi!');
+        setJokerInventory((inv: JokerInventory) => {
+          const nextInv = { ...inv, [activeJoker as JokerType]: inv[activeJoker as JokerType] - 1 };
+          AsyncStorage.setItem('word-crush-inventory', JSON.stringify(nextInv));
+          return nextInv;
+        });
         setActiveJoker(null);
         setJokerTarget(null);
         return;
@@ -991,16 +1196,29 @@ function GameScreen({
     }
 
     if (removedCells.length > 0) {
-      setBoard((currentBoard) => collapseBoard(currentBoard, removedCells));
-      setMessage(`${activeJoker} joker kullanıldı!`);
+      setExplodingCellKeys(new Set(removedCells.map(cellKey)));
+      isAnimatingRef.current = true;
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      
+      setTimeout(() => {
+        setExplodingCellKeys(new Set());
+        LayoutAnimation.configureNext(FallAnimation);
+        setBoard((currentBoard) => collapseBoard(currentBoard, removedCells));
+        setMessage(`${activeJoker} joker kullanıldı!`);
+        isAnimatingRef.current = false;
+      }, 400);
     }
 
     setActiveJoker(null);
     setJokerTarget(null);
-    setJokerInventory((inv: JokerInventory) => ({
-      ...inv,
-      [activeJoker || 'balık']: inv[activeJoker as JokerType] - 1,
-    }));
+    setJokerInventory((inv: JokerInventory) => {
+      const nextInv = {
+        ...inv,
+        [activeJoker || 'balık']: inv[activeJoker as JokerType] - 1,
+      };
+      AsyncStorage.setItem('word-crush-inventory', JSON.stringify(nextInv));
+      return nextInv;
+    });
   };
 
   const finishGame = (
@@ -1026,41 +1244,60 @@ function GameScreen({
     });
   };
 
-  const handleCellPress = (cell: GameCell) => {
+  const getCellFromEvent = (evt: GestureResponderEvent) => {
+    if (gridWidth === 0) return null;
+    const { locationX, locationY } = evt.nativeEvent;
+    const totalCellsWidth = gridOption.size * 36 + (gridOption.size - 1) * 6;
+    const startX = (gridWidth - totalCellsWidth) / 2;
+    const x = locationX - startX;
+    const y = locationY;
+    const cellSize = 42; // 36 width/height + 6 gap
+    const col = Math.floor(x / cellSize);
+    const row = Math.floor(y / cellSize);
+    if (row >= 0 && row < gridOption.size && col >= 0 && col < gridOption.size) {
+      return board[row][col];
+    }
+    return null;
+  };
+
+  const handleTouchStart = (evt: GestureResponderEvent) => {
+    if (isAnimatingRef.current) return;
+    setScrollEnabled(false);
+    const cell = getCellFromEvent(evt);
+    if (!cell) return;
+
     if (activeJoker) {
       handleJokerActivation(cell);
       return;
     }
 
-    if (cell.powerType && !selectedCells.length) {
-      const affectedCells = activatePowerCell(board, cell, cell.powerType);
-      setBoard((currentBoard) => collapseBoard(currentBoard, affectedCells));
-      setMessage(`Özel güç aktivitesi: ${POWER_SYMBOLS[cell.powerType] || '?'}`);
-      return;
-    }
+    setSelectedCells([cell]);
+    setMessage('İlk harf seçildi. Parmağınızı sürükleyin.');
+  };
 
-    if (selectedCells.length === 0) {
-      setSelectedCells([cell]);
-      setMessage('İlk harf seçildi.');
-      return;
-    }
+  const handleTouchMove = (evt: GestureResponderEvent) => {
+    if (isAnimatingRef.current || activeJoker) return;
+    const cell = getCellFromEvent(evt);
+    if (!cell) return;
+    if (selectedCells.length === 0) return;
+
+    const cellKeyStr = cellKey(cell);
+    const isAlreadySelected = selectedCells.some((c) => cellKey(c) === cellKeyStr);
+    if (isAlreadySelected) return;
 
     const lastCell = selectedCells[selectedCells.length - 1];
-    if (selectedCellKeys.has(cellKey(cell))) {
-      setMessage('Aynı hücre tekrar seçilemez.');
-      return;
+    if (areAdjacent(lastCell, cell)) {
+      setSelectedCells((prev) => [...prev, cell]);
+      setMessage('Harf eklendi.');
     }
+  };
 
-    if (!areAdjacent(lastCell, cell)) {
-      setMessage('Sadece komşu hücreler seçilebilir.');
-      return;
-    }
-
-    setSelectedCells((currentCells) => [...currentCells, cell]);
-    setMessage('Harf eklendi.');
+  const handleTouchEnd = () => {
+    setScrollEnabled(true);
   };
 
   const submitSelection = () => {
+    if (isAnimatingRef.current) return;
     if (remainingMoves <= 0) {
       setMessage('Hamle hakkın kalmadı.');
       return;
@@ -1088,78 +1325,141 @@ function GameScreen({
       return;
     }
 
-    const gainedPoints = calculateWordScore(selectedCells.map((cell) => cell.letter));
     const normalizedCandidate = candidateWord;
     
     const combos = findCombos(selectedWord.toLocaleUpperCase('tr-TR'));
-    const comboScore = calculateComboScore(combos);
-    const totalGainedPoints = gainedPoints + comboScore;
+    const totalGainedPoints = calculateComboScore(combos);
+
+    const triggeredPowers = selectedCells.filter((c) => c.powerType);
+    const cellsToCollapse = [...selectedCells];
+    
+    triggeredPowers.forEach((powerCell) => {
+      const affected = activatePowerCell(board, powerCell, powerCell.powerType as string);
+      affected.forEach((ac) => {
+        if (!cellsToCollapse.some((c) => c.row === ac.row && c.col === ac.col)) {
+          cellsToCollapse.push(ac);
+        }
+      });
+    });
     
     const nextScore = score + totalGainedPoints;
     const nextWordCount = wordCount + 1;
     const nextLongestWord =
       normalizedCandidate.length > longestWord.length ? normalizedCandidate.toLocaleUpperCase('tr-TR') : longestWord;
 
-    const powerType = getPowerTypeForWordLength(selectedCells.length);
+    const newPowerType = getPowerTypeForWordLength(selectedCells.length);
     const lastCell = selectedCells[selectedCells.length - 1];
 
     setScore(nextScore);
     setWordCount(nextWordCount);
     setLongestWord(nextLongestWord);
 
-    setBoard((currentBoard) => {
-      const collapsed = collapseBoard(currentBoard, selectedCells);
+    setExplodingCellKeys(new Set(cellsToCollapse.map(cellKey)));
+    isAnimatingRef.current = true;
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
 
-      if (powerType && lastCell) {
-        for (let row = 0; row < collapsed.length; row += 1) {
-          for (let col = 0; col < collapsed[0].length; col += 1) {
-            const cell = collapsed[row][col];
-            if (cell.row === lastCell.row && cell.col === lastCell.col) {
-              (cell as { powerType: string | null }).powerType = powerType;
-              break;
+    setTimeout(() => {
+      setExplodingCellKeys(new Set());
+      LayoutAnimation.configureNext(FallAnimation);
+      setBoard((currentBoard) => {
+        const boardWithPowersCleared = currentBoard.map((r) => r.map((c) => ({ ...c })));
+        triggeredPowers.forEach((p) => {
+          boardWithPowersCleared[p.row][p.col].powerType = null;
+        });
+
+        const collapsed = collapseBoard(boardWithPowersCleared, cellsToCollapse);
+
+        if (newPowerType && lastCell) {
+          for (let row = 0; row < collapsed.length; row += 1) {
+            for (let col = 0; col < collapsed[0].length; col += 1) {
+              const cell = collapsed[row][col];
+              if (cell.row === lastCell.row && cell.col === lastCell.col) {
+                (cell as { powerType: string | null }).powerType = newPowerType;
+                break;
+              }
             }
           }
         }
+
+        return collapsed;
+      });
+
+      const triggeredPowerMsg = triggeredPowers.length > 0 ? ` Özel Güç Tetiklendi!` : '';
+      const powerMsg = newPowerType ? ` Ödül oluştu: ${POWER_SYMBOLS[newPowerType] || '?'}` : '';
+      const comboMsg = combos.length > 1 ? ` (${combos.length}x Combo!)` : '';
+      setMessage(`"${selectedWord}" geçerli. +${totalGainedPoints} puan${comboMsg}.${triggeredPowerMsg}${powerMsg}`);
+      isAnimatingRef.current = false;
+      
+      if (nextMoves === 0) {
+        finishGame(nextScore, nextWordCount, nextLongestWord);
       }
+    }, 400);
 
-      return collapsed;
-    });
-
-    const powerMsg = powerType ? ` Ödül oluştu: ${POWER_SYMBOLS[powerType] || '?'}` : '';
-    const comboMsg = combos.length > 1 ? ` +${combos.length} combo! (${comboScore} bonus puan)` : '';
-    setMessage(`"${selectedWord}" geçerli. +${gainedPoints} puan${comboMsg}.${powerMsg}`);
     resetSelection();
+  };
 
-    if (nextMoves === 0) {
-      finishGame(nextScore, nextWordCount, nextLongestWord);
-    }
+  const handleBackPress = () => {
+    Alert.alert(
+      'Çıkmak istediğinize emin misiniz?',
+      'Oyundan çıkarsanız mevcut puanınız skor tablosuna kaydedilecek.',
+      [
+        { text: 'Hayır', style: 'cancel' },
+        { 
+          text: 'Evet', 
+          style: 'destructive',
+          onPress: () => {
+            finishGame();
+          }
+        }
+      ]
+    );
   };
 
   const boardSize = gridOption.size;
 
   try {
     return (
-      <ScrollView style={styles.gameCard} contentContainerStyle={styles.gameCardContent}>
+      <ScrollView 
+        style={styles.gameCard} 
+        contentContainerStyle={styles.gameCardContent}
+        scrollEnabled={scrollEnabled}
+      >
         <Text style={styles.detailTitle}>OYUN BAŞLADI ✓</Text>
-        <Text style={styles.screenDescription}>{gridOption.label} - Puan: {score}</Text>
+        <Text style={styles.screenDescription}>
+          {gridOption.label} - Puan: {score}
+          {'\n'}Oluşturulabilir Kelime Sayısı: {validWordCount}
+        </Text>
         
         <View style={styles.gameStatsRow}>
           <StatBadge label="Hamle" value={String(remainingMoves)} />
           <StatBadge label="Puan" value={String(score)} />
         </View>
 
-        <View style={styles.gridBoard}>
-          {board.map((row) => (
-            <View key={row[0].row} style={styles.gridRow}>
-              {row.map((cell) => (
-                <Pressable
-                  key={cellKey(cell)}
-                  style={[styles.gridCell, selectedCellKeys.has(cellKey(cell)) && styles.gridCellSelected]}
-                  onPress={() => handleCellPress(cell)}
-                >
-                  <Text style={styles.gridCellText}>{cell.letter}</Text>
-                </Pressable>
-              ))}
+        <View 
+          style={[styles.gridBoard, { width: boardSize * 42 - 6, height: boardSize * 42 - 6, alignSelf: 'center' }]}
+          onLayout={(e) => setGridWidth(e.nativeEvent.layout.width)}
+          onStartShouldSetResponder={() => true}
+          onResponderGrant={handleTouchStart}
+          onResponderMove={handleTouchMove}
+          onResponderRelease={handleTouchEnd}
+          onResponderTerminate={handleTouchEnd}
+        >
+          {board.flat().map((cell) => (
+            <View
+              key={cell.id}
+              pointerEvents="none"
+              style={[
+                styles.gridCell,
+                { position: 'absolute', top: cell.row * 42, left: cell.col * 42 },
+                selectedCellKeys.has(cellKey(cell)) && styles.gridCellSelected, 
+                cell.powerType && styles.gridCellPower,
+                explodingCellKeys.has(cellKey(cell)) && styles.gridCellExploding
+              ]}
+            >
+              <Text style={[styles.gridCellText, cell.powerType && styles.gridCellPowerText]}>
+                {cell.letter}
+                {cell.powerType ? ` ${POWER_SYMBOLS[cell.powerType]}` : ''}
+              </Text>
             </View>
           ))}
         </View>
@@ -1193,13 +1493,15 @@ function GameScreen({
               }}
               disabled={jokerInventory[jokerType] === 0}
             >
-              <Text style={styles.jokerButtonText}>{jokerType[0].toUpperCase()}</Text>
+              <Text style={styles.jokerButtonText}>
+                {JOKER_ITEMS.find((j) => j.id === jokerType)?.icon || jokerType[0].toUpperCase()}
+              </Text>
               <Text style={styles.jokerButtonCount}>{jokerInventory[jokerType]}</Text>
             </Pressable>
           ))}
         </View>
 
-        <Pressable style={styles.secondaryButton} onPress={onBack}>
+        <Pressable style={styles.secondaryButton} onPress={handleBackPress}>
           <Text style={styles.secondaryButtonText}>Geri Dön</Text>
         </Pressable>
       </ScrollView>
@@ -1506,6 +1808,15 @@ const styles = StyleSheet.create({
   },
   gridCellSelected: {
     backgroundColor: '#F97316',
+  },
+  gridCellExploding: {
+    backgroundColor: '#EF4444',
+    transform: [{ scale: 1.15 }],
+    zIndex: 10,
+    elevation: 10,
+    shadowColor: '#EF4444',
+    shadowOpacity: 0.9,
+    shadowRadius: 10,
   },
   gridCellText: {
     color: '#F8FAFC',
