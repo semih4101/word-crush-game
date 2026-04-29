@@ -2,25 +2,20 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import {
   Alert,
+  Dimensions,
   GestureResponderEvent,
+  Image,
+  Modal,
   Pressable,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   View,
   LayoutAnimation,
-  Platform,
-  UIManager,
+  Animated,
 } from 'react-native';
-
-if (
-  Platform.OS === 'android' &&
-  UIManager.setLayoutAnimationEnabledExperimental
-) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
+import { SafeAreaView, SafeAreaProvider } from 'react-native-safe-area-context';
 
 const FallAnimation = {
   duration: 400,
@@ -43,9 +38,18 @@ const FallAnimation = {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const STORAGE_KEY = 'word-crush-player-name';
-const HISTORY_STORAGE_KEY = 'word-crush-game-history';
-const GOLD_STORAGE_KEY = 'word-crush-gold';
-const INVENTORY_STORAGE_KEY = 'word-crush-inventory';
+// Her kullanıcı için ayrı storage key'leri
+function getUserGoldKey(name: string) {
+  return `word-crush-gold-${name.trim().toLocaleLowerCase('tr-TR')}`;
+}
+function getUserInventoryKey(name: string) {
+  return `word-crush-inventory-${name.trim().toLocaleLowerCase('tr-TR')}`;
+}
+
+// Her kullanıcı için ayrı history key'i
+function getUserHistoryKey(name: string) {
+  return `word-crush-history-${name.trim().toLocaleLowerCase('tr-TR')}`;
+}
 
 type Screen = 'home' | 'newGame' | 'scoreTable' | 'market' | 'game';
 type GridOption = {
@@ -492,11 +496,17 @@ function findCombos(word: string): string[] {
   const normalized = word.toLocaleLowerCase('tr-TR');
   const combos = new Set<string>();
 
+  // Ana kelimeyi her zaman ekle (sözlükte olduğu zaten doğrulanmış)
+  if (normalized.length >= 3 && WORD_DICTIONARY.has(normalized)) {
+    combos.add(normalized);
+  }
+
+  // Alt kelimeleri bul (ana kelimenin harf sırasına göre substring'ler)
   for (let i = 0; i < normalized.length; i += 1) {
     let current = '';
     for (let j = i; j < normalized.length; j += 1) {
       current += normalized[j];
-      if (current.length >= 3 && WORD_DICTIONARY.has(current)) {
+      if (current.length >= 3 && current !== normalized && WORD_DICTIONARY.has(current)) {
         combos.add(current);
       }
     }
@@ -650,13 +660,22 @@ const JOKER_ITEMS: JokerItem[] = [
   },
 ];
 
+function parseDurationMinutes(duration: string): number {
+  // Desteklenen formatlar: "6 dk", "1 saat", "1 saat 25 dk"
+  const saatMatch = duration.match(/(\d+)\s*saat/);
+  const dkMatch = duration.match(/(\d+)\s*dk/);
+  const hours = saatMatch ? parseInt(saatMatch[1], 10) : 0;
+  const minutes = dkMatch ? parseInt(dkMatch[1], 10) : 0;
+  return hours * 60 + minutes;
+}
+
 function buildScoreSummary(records: SavedGameRecord[]) {
   const totalGames = records.length;
   const highestScore = totalGames > 0 ? Math.max(...records.map((record) => record.score)) : 0;
   const averageScore = totalGames > 0 ? Math.round(records.reduce((sum, record) => sum + record.score, 0) / totalGames) : 0;
   const totalWords = records.reduce((sum, record) => sum + record.wordCount, 0);
   const longestWord = records.reduce((longest, record) => (record.longestWord.length > longest.length ? record.longestWord : longest), '');
-  const totalDuration = records.reduce((sum, record) => sum + Number(record.duration.replace(/\D/g, '')) || 0, 0);
+  const totalDuration = records.reduce((sum, record) => sum + parseDurationMinutes(record.duration), 0);
 
   const formatDuration = (mins: number) => {
     if (mins === 0) return '0 dk';
@@ -694,39 +713,62 @@ export default function App() {
     parti: 0,
   });
 
+  // Belirli bir kullanıcının geçmişini yükler
+  const loadUserHistory = async (name: string) => {
+    const key = getUserHistoryKey(name);
+    const stored = await AsyncStorage.getItem(key);
+    if (stored) {
+      try {
+        setGameHistory(JSON.parse(stored) as SavedGameRecord[]);
+      } catch {
+        setGameHistory([]);
+      }
+    } else {
+      setGameHistory([]);
+    }
+  };
+
+  // Kullanıcıya özel altın ve joker verilerini yükler
+  const loadUserResources = async (name: string) => {
+    const goldKey = getUserGoldKey(name);
+    const invKey = getUserInventoryKey(name);
+    
+    const storedGold = await AsyncStorage.getItem(goldKey);
+    const storedInventory = await AsyncStorage.getItem(invKey);
+
+    if (storedGold !== null) {
+      setGold(Number(storedGold));
+    } else {
+      setGold(10000); // Varsayılan başlangıç altını
+    }
+
+    if (storedInventory) {
+      try {
+        setJokerInventory(JSON.parse(storedInventory) as JokerInventory);
+      } catch {
+        setJokerInventory({ balık: 0, tekerlek: 0, lolipop: 0, değiştirme: 0, karıştırma: 0, parti: 0 });
+      }
+    } else {
+      setJokerInventory({ balık: 0, tekerlek: 0, lolipop: 0, değiştirme: 0, karıştırma: 0, parti: 0 });
+    }
+  };
+
   useEffect(() => {
     const loadInitialData = async () => {
       const storedName = await AsyncStorage.getItem(STORAGE_KEY);
-      const storedHistory = await AsyncStorage.getItem(HISTORY_STORAGE_KEY);
-      const storedGold = await AsyncStorage.getItem(GOLD_STORAGE_KEY);
-      const storedInventory = await AsyncStorage.getItem(INVENTORY_STORAGE_KEY);
 
       if (storedName) {
         setPlayerName(storedName);
-      }
-
-      if (storedHistory) {
-        try {
-          setGameHistory(JSON.parse(storedHistory) as SavedGameRecord[]);
-        } catch {
-          setGameHistory([]);
-        }
-      }
-
-      if (storedGold !== null) {
-        setGold(Number(storedGold));
-      }
-
-      if (storedInventory) {
-        try {
-          setJokerInventory(JSON.parse(storedInventory) as JokerInventory);
-        } catch {}
+        // Kaydedilmiş kullanıcının geçmişini ve kaynaklarını yükle
+        await loadUserHistory(storedName);
+        await loadUserResources(storedName);
       }
 
       setIsReady(true);
     };
 
     void loadInitialData();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const trimmedDraftName = useMemo(() => draftName.trim(), [draftName]);
@@ -739,6 +781,9 @@ export default function App() {
 
     await AsyncStorage.setItem(STORAGE_KEY, trimmedDraftName);
     setPlayerName(trimmedDraftName);
+    // Yeni kullanıcının geçmişini ve kaynaklarını yükle
+    await loadUserHistory(trimmedDraftName);
+    await loadUserResources(trimmedDraftName);
     setDraftName('');
   };
 
@@ -746,6 +791,10 @@ export default function App() {
     await AsyncStorage.removeItem(STORAGE_KEY);
     setPlayerName('');
     setDraftName('');
+    // Önceki kullanıcının geçmişini ve kaynaklarını temizle ekranda
+    setGameHistory([]);
+    setGold(10000);
+    setJokerInventory({ balık: 0, tekerlek: 0, lolipop: 0, değiştirme: 0, karıştırma: 0, parti: 0 });
     setScreen('home');
   };
 
@@ -757,7 +806,8 @@ export default function App() {
     const nextHistory = [nextRecord, ...gameHistory];
 
     setGameHistory(nextHistory);
-    await AsyncStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(nextHistory));
+    // Kullanıcıya özel key ile kaydet
+    await AsyncStorage.setItem(getUserHistoryKey(playerName), JSON.stringify(nextHistory));
     setSelectedGrid(null);
     setSelectedMoves(null);
     setScreen('scoreTable');
@@ -767,54 +817,56 @@ export default function App() {
     if (screen === 'newGame') {
       if (!selectedGrid) {
         return (
-          <View style={styles.menuCard}>
-            <Text style={styles.menuTitle}>Grid Boyutu Seçimi</Text>
-            <Text style={styles.screenDescription}>
-              Önce oynamak istediğin oyun alanının boyutunu seç.
-            </Text>
-
-            {GRID_OPTIONS.map((option) => (
-              <Pressable
-                key={option.label}
-                style={styles.menuButton}
-                onPress={() => setSelectedGrid(option)}
-              >
-                <Text style={styles.menuButtonText}>{option.label}</Text>
-              </Pressable>
-            ))}
-
-            <Pressable style={styles.secondaryButton} onPress={() => setScreen('home')}>
-              <Text style={styles.secondaryButtonText}>Geri Dön</Text>
+          <>
+            <Pressable style={styles.topRightBackButton} onPress={() => setScreen('home')}>
+              <Text style={styles.topRightBackButtonText}>✕ Çık</Text>
             </Pressable>
-          </View>
+            <View style={styles.menuCard}>
+              <Text style={styles.menuTitle}>Grid Boyutu Seçimi</Text>
+              <Text style={styles.screenDescription}>
+                Önce oynamak istediğin oyun alanının boyutunu seç.
+              </Text>
+
+              {GRID_OPTIONS.map((option) => (
+                <Pressable
+                  key={option.label}
+                  style={styles.menuButton}
+                  onPress={() => setSelectedGrid(option)}
+                >
+                  <Text style={styles.menuButtonText}>{option.label}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </>
         );
       }
 
       if (!selectedMoves) {
         return (
-          <View style={styles.menuCard}>
-            <Text style={styles.menuTitle}>Hamle Sayısı Seçimi</Text>
-            <Text style={styles.screenDescription}>
-              Oyunun zorluk seviyesini (hamle sayısını) belirle.
-            </Text>
-
-            {MOVE_OPTIONS.map((option) => (
-              <Pressable
-                key={option.label}
-                style={styles.menuButton}
-                onPress={() => {
-                  setSelectedMoves(option);
-                  setScreen('game');
-                }}
-              >
-                <Text style={styles.menuButtonText}>{option.label}</Text>
-              </Pressable>
-            ))}
-
-            <Pressable style={styles.secondaryButton} onPress={() => setSelectedGrid(null)}>
-              <Text style={styles.secondaryButtonText}>Geri Dön</Text>
+          <>
+            <Pressable style={styles.topRightBackButton} onPress={() => setSelectedGrid(null)}>
+              <Text style={styles.topRightBackButtonText}>↩ Geri</Text>
             </Pressable>
-          </View>
+            <View style={styles.menuCard}>
+              <Text style={styles.menuTitle}>Hamle Sayısı Seçimi</Text>
+              <Text style={styles.screenDescription}>
+                Oyunun zorluk seviyesini (hamle sayısını) belirle.
+              </Text>
+
+              {MOVE_OPTIONS.map((option) => (
+                <Pressable
+                  key={option.label}
+                  style={styles.menuButton}
+                  onPress={() => {
+                    setSelectedMoves(option);
+                    setScreen('game');
+                  }}
+                >
+                  <Text style={styles.menuButtonText}>{option.label}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </>
         );
       }
     }
@@ -824,8 +876,12 @@ export default function App() {
       const records = gameHistory.length > 0 ? gameHistory : GAME_HISTORY;
 
       return (
-        <ScrollView style={styles.detailCard} contentContainerStyle={styles.scrollContent}>
-          <Text style={styles.detailTitle}>Skor Tablosu</Text>
+        <>
+          <Pressable style={styles.topRightBackButton} onPress={() => setScreen('home')}>
+            <Text style={styles.topRightBackButtonText}>✕ Çık</Text>
+          </Pressable>
+          <ScrollView style={styles.detailCard} contentContainerStyle={styles.scrollContent}>
+            <Text style={styles.detailTitle}>Skor Tablosu</Text>
           <Text style={styles.screenDescription}>
             Geçmiş performans ve oyun özeti burada gösterilecek.
           </Text>
@@ -852,18 +908,19 @@ export default function App() {
               </View>
             ))}
           </View>
-
-          <Pressable style={styles.secondaryButton} onPress={() => setScreen('home')}>
-            <Text style={styles.secondaryButtonText}>Geri Dön</Text>
-          </Pressable>
         </ScrollView>
+        </>
       );
     }
 
     if (screen === 'market') {
       return (
-        <ScrollView style={styles.detailCard} contentContainerStyle={styles.scrollContent}>
-          <Text style={styles.detailTitle}>Market</Text>
+        <>
+          <Pressable style={styles.topRightBackButton} onPress={() => setScreen('home')}>
+            <Text style={styles.topRightBackButtonText}>✕ Çık</Text>
+          </Pressable>
+          <ScrollView style={styles.detailCard} contentContainerStyle={styles.scrollContent}>
+            <Text style={styles.detailTitle}>Market</Text>
           <Text style={styles.screenDescription}>
             Başlangıç altını ile joker satın alma alanı.
           </Text>
@@ -893,7 +950,7 @@ export default function App() {
                       if (canBuy) {
                         setGold((g) => {
                           const nextGold = g - item.cost;
-                          AsyncStorage.setItem(GOLD_STORAGE_KEY, String(nextGold));
+                          AsyncStorage.setItem(getUserGoldKey(playerName), String(nextGold));
                           return nextGold;
                         });
                         setJokerInventory((inv) => {
@@ -901,7 +958,7 @@ export default function App() {
                             ...inv,
                             [item.id]: inv[item.id as JokerType] + 1,
                           };
-                          AsyncStorage.setItem(INVENTORY_STORAGE_KEY, JSON.stringify(nextInv));
+                          AsyncStorage.setItem(getUserInventoryKey(playerName), JSON.stringify(nextInv));
                           return nextInv;
                         });
                       }
@@ -916,17 +973,15 @@ export default function App() {
               );
             })}
           </View>
-
-          <Pressable style={styles.secondaryButton} onPress={() => setScreen('home')}>
-            <Text style={styles.secondaryButtonText}>Geri Dön</Text>
-          </Pressable>
         </ScrollView>
+        </>
       );
     }
 
     if (screen === 'game' && selectedGrid && selectedMoves) {
       return (
         <GameScreen
+          playerName={playerName}
           gridOption={selectedGrid}
           moveOption={selectedMoves}
           jokerInventory={jokerInventory}
@@ -942,74 +997,81 @@ export default function App() {
     }
 
     return (
-      <View style={styles.menuCard}>
-        <Text style={styles.menuTitle}>Ana Menü</Text>
+      <View style={styles.menuWrapper}>
+        <Image source={require('./assets/logo.png')} style={styles.logo} />
+        <Text style={styles.title}>Word Crush</Text>
+        <Text style={styles.subtitle}>Hoş geldin, {playerName}.</Text>
 
-        <MenuButton label="Yeni Oyun" onPress={() => setScreen('newGame')} />
-        <MenuButton label="Skor Tablosu" onPress={() => setScreen('scoreTable')} />
-        <MenuButton label="Market" onPress={() => setScreen('market')} />
+        <View style={styles.menuCard}>
+          <Text style={styles.menuTitle}>Ana Menü</Text>
+
+          <MenuButton label="Yeni Oyun" onPress={() => setScreen('newGame')} />
+          <MenuButton label="Skor Tablosu" onPress={() => setScreen('scoreTable')} />
+          <MenuButton label="Market" onPress={() => setScreen('market')} />
+        </View>
       </View>
     );
   };
 
   if (!isReady) {
     return (
-      <SafeAreaView style={styles.container}>
-        <StatusBar style="light" />
-        <Text style={styles.title}>Word Crush</Text>
-        <Text style={styles.subtitle}>Yükleniyor...</Text>
-      </SafeAreaView>
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.container}>
+          <StatusBar style="light" />
+          <Image source={require('./assets/logo.png')} style={styles.logo} />
+          <Text style={styles.title}>Word Crush</Text>
+          <Text style={styles.subtitle}>Yükleniyor...</Text>
+        </SafeAreaView>
+      </SafeAreaProvider>
     );
   }
 
   if (!playerName) {
     return (
-      <SafeAreaView style={styles.container}>
-        <StatusBar style="light" />
-        <Text style={styles.title}>Word Crush</Text>
-        <Text style={styles.subtitle}>Başlamak için kullanıcı adını gir.</Text>
+      <SafeAreaProvider>
+        <SafeAreaView style={styles.container}>
+          <StatusBar style="light" />
+          <Image source={require('./assets/logo.png')} style={styles.logo} />
+          <Text style={styles.title}>Word Crush</Text>
+          <Text style={styles.subtitle}>Başlamak için kullanıcı adını gir.</Text>
 
-        <TextInput
-          value={draftName}
-          onChangeText={setDraftName}
-          placeholder="Kullanıcı adı"
-          placeholderTextColor="#64748B"
-          style={styles.input}
-          autoCapitalize="words"
-          autoCorrect={false}
-          returnKeyType="done"
-          onSubmitEditing={savePlayerName}
-        />
+          <TextInput
+            value={draftName}
+            onChangeText={setDraftName}
+            placeholder="Kullanıcı adı"
+            placeholderTextColor="#64748B"
+            style={styles.input}
+            autoCapitalize="words"
+            autoCorrect={false}
+            returnKeyType="done"
+            onSubmitEditing={savePlayerName}
+          />
 
-        <Pressable style={styles.primaryButton} onPress={savePlayerName}>
-          <Text style={styles.primaryButtonText}>Devam Et</Text>
-        </Pressable>
+          <Pressable style={styles.primaryButton} onPress={savePlayerName}>
+            <Text style={styles.primaryButtonText}>Devam Et</Text>
+          </Pressable>
 
-        <Text style={styles.caption}>
-          İsim bir kez girildikten sonra cihazda saklanacak.
-        </Text>
-      </SafeAreaView>
+          <Text style={styles.caption}>
+            İsim bir kez girildikten sonra cihazda saklanacak.
+          </Text>
+        </SafeAreaView>
+      </SafeAreaProvider>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar style="light" />
+    <SafeAreaProvider>
+      <SafeAreaView style={styles.container}>
+        <StatusBar style="light" />
 
-      <Pressable onPress={changePlayerName} style={styles.nameBadge}>
-        <Text style={styles.nameBadgeLabel}>Kullanıcı</Text>
-        <Text style={styles.nameBadgeValue}>{playerName}</Text>
-      </Pressable>
+        <Pressable onPress={changePlayerName} style={styles.nameBadge}>
+          <Text style={styles.nameBadgeLabel}>Kullanıcı</Text>
+          <Text style={styles.nameBadgeValue}>{playerName}</Text>
+        </Pressable>
 
-      <Text style={styles.title}>Word Crush</Text>
-      <Text style={styles.subtitle}>Hoş geldin, {playerName}.</Text>
-
-      {renderScreenContent()}
-
-      <Text style={styles.caption}>
-        İlk bölüm tamamlandı. Şimdi yeni oyun akışını inşa ediyoruz.
-      </Text>
-    </SafeAreaView>
+        {renderScreenContent()}
+      </SafeAreaView>
+    </SafeAreaProvider>
   );
 }
 
@@ -1047,7 +1109,49 @@ function MenuScreen({
   );
 }
 
+type FloatingScore = {
+  id: string;
+  points: number;
+  x: number;
+  y: number;
+};
+
+function FloatingScoreDisplay({ score, onComplete }: { score: FloatingScore; onComplete: () => void }) {
+  const translateY = useRef(new Animated.Value(0)).current;
+  const opacity = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(translateY, { toValue: -60, duration: 800, useNativeDriver: false }),
+      Animated.timing(opacity, { toValue: 0, duration: 800, useNativeDriver: false }),
+    ]).start(() => onComplete());
+  }, []);
+
+  return (
+    <Animated.Text
+      pointerEvents="none"
+      style={{
+        position: 'absolute',
+        left: score.x,
+        top: score.y,
+        transform: [{ translateY }],
+        opacity,
+        color: '#FCD34D',
+        fontSize: 26,
+        fontWeight: '900',
+        textShadowColor: '#D97706',
+        textShadowOffset: { width: 0, height: 2 },
+        textShadowRadius: 8,
+        zIndex: 100,
+      }}
+    >
+      +{score.points}
+    </Animated.Text>
+  );
+}
+
 function GameScreen({
+  playerName,
   gridOption,
   moveOption,
   jokerInventory,
@@ -1055,6 +1159,7 @@ function GameScreen({
   onBack,
   onFinish,
 }: {
+  playerName: string;
   gridOption: GridOption;
   moveOption: MoveOption;
   jokerInventory: JokerInventory;
@@ -1069,6 +1174,8 @@ function GameScreen({
   
   const [explodingCellKeys, setExplodingCellKeys] = useState<Set<string>>(new Set());
   const isAnimatingRef = useRef(false);
+  const [floatingScores, setFloatingScores] = useState<FloatingScore[]>([]);
+  const shakeAnim = useRef(new Animated.Value(0)).current;
 
   const [selectedCells, setSelectedCells] = useState<GameCell[]>([]);
   const [remainingMoves, setRemainingMoves] = useState(moveOption.moves);
@@ -1076,25 +1183,39 @@ function GameScreen({
   const [wordCount, setWordCount] = useState(0);
   const [longestWord, setLongestWord] = useState('');
   const [validWordCount, setValidWordCount] = useState(0);
+  const [foundWords, setFoundWords] = useState<string[]>([]);
   const [message, setMessage] = useState('Bir kelime oluşturmak için komşu harfleri seç.');
   const [activeJoker, setActiveJoker] = useState<JokerType | null>(null);
   const [jokerTarget, setJokerTarget] = useState<GameCell | null>(null);
   const [gridWidth, setGridWidth] = useState(0);
   const [scrollEnabled, setScrollEnabled] = useState(true);
+  const [gameOverRecord, setGameOverRecord] = useState<SavedGameRecord | null>(null);
   const startedAtRef = useRef(Date.now());
   const isFinishedRef = useRef(false);
 
+  // Dinamik hücre boyutu — ekran genişliğine göre hesaplanır
+  const screenWidth = Dimensions.get('window').width;
+  const CELL_GAP = 3;
+  const availableWidth = Math.min(screenWidth - 52, 344);
+  const CELL_INNER = Math.max(26, Math.floor((availableWidth - (gridOption.size - 1) * CELL_GAP) / gridOption.size));
+  const CELL_STEP = CELL_INNER + CELL_GAP;
+
   useEffect(() => {
-    const disjointCount = countNonOverlappingWords(board);
-    setValidWordCount(disjointCount);
-    
-    if (disjointCount === 0 && !isFinishedRef.current && remainingMoves > 0) {
-      setMessage('Kelime kalmadı, tahta yeniden üretiliyor...');
-      setTimeout(() => {
-        const newBoard = ensureBoardHasWords(gridOption.size);
-        setBoard(newBoard);
-      }, 1000);
-    }
+    // Ağır hesaplamayı render'ı bloke etmemesi için defer ediyoruz
+    const timer = setTimeout(() => {
+      const disjointCount = countNonOverlappingWords(board);
+      setValidWordCount(disjointCount);
+
+      if (disjointCount === 0 && !isFinishedRef.current && remainingMoves > 0) {
+        setMessage('Kelime kalmadı, tahta yeniden üretiliyor...');
+        setTimeout(() => {
+          const newBoard = ensureBoardHasWords(gridOption.size);
+          setBoard(newBoard);
+        }, 1000);
+      }
+    }, 100);
+
+    return () => clearTimeout(timer);
   }, [board, gridOption.size, remainingMoves]);
 
   const selectedCellKeys = new Set(selectedCells.map(cellKey));
@@ -1152,7 +1273,7 @@ function GameScreen({
       setMessage('Harfler karıştırıldı!');
       setJokerInventory((inv: JokerInventory) => {
         const nextInv = { ...inv, [activeJoker as JokerType]: inv[activeJoker as JokerType] - 1 };
-        AsyncStorage.setItem('word-crush-inventory', JSON.stringify(nextInv));
+        AsyncStorage.setItem(getUserInventoryKey(playerName), JSON.stringify(nextInv));
         return nextInv;
       });
       setActiveJoker(null);
@@ -1183,7 +1304,7 @@ function GameScreen({
         setMessage('Harfler değiştirildi!');
         setJokerInventory((inv: JokerInventory) => {
           const nextInv = { ...inv, [activeJoker as JokerType]: inv[activeJoker as JokerType] - 1 };
-          AsyncStorage.setItem('word-crush-inventory', JSON.stringify(nextInv));
+          AsyncStorage.setItem(getUserInventoryKey(playerName), JSON.stringify(nextInv));
           return nextInv;
         });
         setActiveJoker(null);
@@ -1216,7 +1337,7 @@ function GameScreen({
         ...inv,
         [activeJoker || 'balık']: inv[activeJoker as JokerType] - 1,
       };
-      AsyncStorage.setItem('word-crush-inventory', JSON.stringify(nextInv));
+      AsyncStorage.setItem(getUserInventoryKey(playerName), JSON.stringify(nextInv));
       return nextInv;
     });
   };
@@ -1226,14 +1347,11 @@ function GameScreen({
     finalWordCount = wordCount,
     finalLongestWord = longestWord,
   ) => {
-    if (isFinishedRef.current) {
-      return;
-    }
-
+    if (isFinishedRef.current) return;
     isFinishedRef.current = true;
     const elapsedMinutes = Math.max(1, Math.round((Date.now() - startedAtRef.current) / 60000));
-
-    onFinish({
+    // Direkt kaydetmek yerine oyun sonu modalını göster
+    setGameOverRecord({
       gameNumber: 0,
       date: new Date().toLocaleDateString('tr-TR'),
       grid: gridOption.label,
@@ -1245,15 +1363,9 @@ function GameScreen({
   };
 
   const getCellFromEvent = (evt: GestureResponderEvent) => {
-    if (gridWidth === 0) return null;
     const { locationX, locationY } = evt.nativeEvent;
-    const totalCellsWidth = gridOption.size * 36 + (gridOption.size - 1) * 6;
-    const startX = (gridWidth - totalCellsWidth) / 2;
-    const x = locationX - startX;
-    const y = locationY;
-    const cellSize = 42; // 36 width/height + 6 gap
-    const col = Math.floor(x / cellSize);
-    const row = Math.floor(y / cellSize);
+    const col = Math.floor(locationX / CELL_STEP);
+    const row = Math.floor(locationY / CELL_STEP);
     if (row >= 0 && row < gridOption.size && col >= 0 && col < gridOption.size) {
       return board[row][col];
     }
@@ -1283,7 +1395,17 @@ function GameScreen({
 
     const cellKeyStr = cellKey(cell);
     const isAlreadySelected = selectedCells.some((c) => cellKey(c) === cellKeyStr);
-    if (isAlreadySelected) return;
+    if (isAlreadySelected) {
+      // Eğer parmak bir önceki seçili hücreye geri döndüyse, son seçimi iptal et (Geri sürükleyerek silme)
+      if (selectedCells.length > 1) {
+        const secondLastCell = selectedCells[selectedCells.length - 2];
+        if (cellKey(secondLastCell) === cellKeyStr) {
+          setSelectedCells((prev) => prev.slice(0, -1));
+          return;
+        }
+      }
+      return;
+    }
 
     const lastCell = selectedCells[selectedCells.length - 1];
     if (areAdjacent(lastCell, cell)) {
@@ -1308,6 +1430,12 @@ function GameScreen({
 
     if (selectedCells.length < 3) {
       setMessage('En az 3 harf seçmelisin. Bu deneme yine de bir hamle sayıldı.');
+      Animated.sequence([
+        Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: false }),
+        Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: false }),
+        Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: false }),
+        Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: false }),
+      ]).start();
       resetSelection();
       if (nextMoves === 0) {
         finishGame(score, wordCount, longestWord);
@@ -1318,6 +1446,12 @@ function GameScreen({
     const candidateWord = selectedWord.toLocaleLowerCase('tr-TR');
     if (!WORD_DICTIONARY.has(candidateWord)) {
       setMessage(`"${selectedWord}" sözlükte bulunamadı. Hamle yine de kullanıldı.`);
+      Animated.sequence([
+        Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: false }),
+        Animated.timing(shakeAnim, { toValue: -10, duration: 50, useNativeDriver: false }),
+        Animated.timing(shakeAnim, { toValue: 10, duration: 50, useNativeDriver: false }),
+        Animated.timing(shakeAnim, { toValue: 0, duration: 50, useNativeDriver: false }),
+      ]).start();
       resetSelection();
       if (nextMoves === 0) {
         finishGame(score, wordCount, longestWord);
@@ -1353,9 +1487,17 @@ function GameScreen({
     setScore(nextScore);
     setWordCount(nextWordCount);
     setLongestWord(nextLongestWord);
+    setFoundWords((prev) => [selectedWord.toLocaleUpperCase('tr-TR'), ...prev]);
 
     setExplodingCellKeys(new Set(cellsToCollapse.map(cellKey)));
     isAnimatingRef.current = true;
+    
+    // Yüzen Puan Animasyonunu Başlat
+    const fx = lastCell ? lastCell.col * CELL_STEP : 0;
+    const fy = lastCell ? lastCell.row * CELL_STEP : 0;
+    const scoreId = Date.now().toString();
+    setFloatingScores((prev) => [...prev, { id: scoreId, points: totalGainedPoints, x: fx, y: fy }]);
+
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
 
     setTimeout(() => {
@@ -1370,15 +1512,8 @@ function GameScreen({
         const collapsed = collapseBoard(boardWithPowersCleared, cellsToCollapse);
 
         if (newPowerType && lastCell) {
-          for (let row = 0; row < collapsed.length; row += 1) {
-            for (let col = 0; col < collapsed[0].length; col += 1) {
-              const cell = collapsed[row][col];
-              if (cell.row === lastCell.row && cell.col === lastCell.col) {
-                (cell as { powerType: string | null }).powerType = newPowerType;
-                break;
-              }
-            }
-          }
+          // Collapse sonrası lastCell pozisyonundaki hücreye doğrudan erişim
+          collapsed[lastCell.row][lastCell.col].powerType = newPowerType;
         }
 
         return collapsed;
@@ -1419,24 +1554,28 @@ function GameScreen({
 
   try {
     return (
-      <ScrollView 
-        style={styles.gameCard} 
-        contentContainerStyle={styles.gameCardContent}
-        scrollEnabled={scrollEnabled}
+      <>
+        <Pressable style={styles.topRightBackButton} onPress={handleBackPress}>
+          <Text style={styles.topRightBackButtonText}>✕ Çık</Text>
+        </Pressable>
+        <ScrollView
+          style={styles.gameCard}
+          contentContainerStyle={styles.gameCardContent}
+          scrollEnabled={scrollEnabled}
       >
-        <Text style={styles.detailTitle}>OYUN BAŞLADI ✓</Text>
-        <Text style={styles.screenDescription}>
-          {gridOption.label} - Puan: {score}
-          {'\n'}Oluşturulabilir Kelime Sayısı: {validWordCount}
-        </Text>
-        
+        {/* Oyun üst bilgileri */}
         <View style={styles.gameStatsRow}>
-          <StatBadge label="Hamle" value={String(remainingMoves)} />
+          <StatBadge label="Hamle" value={String(remainingMoves)} danger={remainingMoves <= 5} />
           <StatBadge label="Puan" value={String(score)} />
+          <StatBadge label="Kelime" value={String(validWordCount)} />
         </View>
 
-        <View 
-          style={[styles.gridBoard, { width: boardSize * 42 - 6, height: boardSize * 42 - 6, alignSelf: 'center' }]}
+        {/* Oyun grid — dinamik hücre boyutu */}
+        <View
+          style={[
+            styles.gridBoard,
+            { width: boardSize * CELL_STEP - CELL_GAP, height: boardSize * CELL_STEP - CELL_GAP, alignSelf: 'center' },
+          ]}
           onLayout={(e) => setGridWidth(e.nativeEvent.layout.width)}
           onStartShouldSetResponder={() => true}
           onResponderGrant={handleTouchStart}
@@ -1450,22 +1589,56 @@ function GameScreen({
               pointerEvents="none"
               style={[
                 styles.gridCell,
-                { position: 'absolute', top: cell.row * 42, left: cell.col * 42 },
-                selectedCellKeys.has(cellKey(cell)) && styles.gridCellSelected, 
+                {
+                  position: 'absolute',
+                  top: cell.row * CELL_STEP,
+                  left: cell.col * CELL_STEP,
+                  width: CELL_INNER,
+                  height: CELL_INNER,
+                },
+                selectedCellKeys.has(cellKey(cell)) && styles.gridCellSelected,
                 cell.powerType && styles.gridCellPower,
-                explodingCellKeys.has(cellKey(cell)) && styles.gridCellExploding
+                explodingCellKeys.has(cellKey(cell)) && styles.gridCellExploding,
               ]}
             >
-              <Text style={[styles.gridCellText, cell.powerType && styles.gridCellPowerText]}>
-                {cell.letter}
-                {cell.powerType ? ` ${POWER_SYMBOLS[cell.powerType]}` : ''}
-              </Text>
+              {cell.powerType ? (
+                <Text style={[styles.gridCellText, styles.gridCellPowerText]}>
+                  {POWER_SYMBOLS[cell.powerType]}
+                </Text>
+              ) : (
+                <>
+                  <Text style={styles.gridCellText}>{cell.letter}</Text>
+                  <Text style={styles.gridCellScore}>{LETTER_POINTS[cell.letter] ?? 1}</Text>
+                </>
+              )}
             </View>
+          ))}
+          {floatingScores.map((score) => (
+            <FloatingScoreDisplay
+              key={score.id}
+              score={score}
+              onComplete={() => setFloatingScores((prev) => prev.filter((s) => s.id !== score.id))}
+            />
           ))}
         </View>
 
         <Text style={styles.gameMessage}>{message}</Text>
-        <Text style={styles.gameMessage}>Seçili: {selectedWord || '-'}</Text>
+        <Animated.Text style={[styles.gameMessage, { transform: [{ translateX: shakeAnim }] }]}>
+          Seçili: {selectedWord || '-'}
+        </Animated.Text>
+
+        {foundWords.length > 0 && (
+          <View style={styles.foundWordsContainer}>
+            <Text style={styles.foundWordsTitle}>Bulunan Kelimeler:</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.foundWordsScroll}>
+              {foundWords.map((word, idx) => (
+                <View key={`${word}-${idx}`} style={styles.wordPill}>
+                  <Text style={styles.wordPillText}>{word}</Text>
+                </View>
+              ))}
+            </ScrollView>
+          </View>
+        )}
 
         <View style={styles.gameActionRow}>
           <Pressable style={styles.primaryButton} onPress={submitSelection}>
@@ -1500,30 +1673,68 @@ function GameScreen({
             </Pressable>
           ))}
         </View>
-
-        <Pressable style={styles.secondaryButton} onPress={handleBackPress}>
-          <Text style={styles.secondaryButtonText}>Geri Dön</Text>
-        </Pressable>
       </ScrollView>
+
+      {/* Oyun Sonu Modalı */}
+      <Modal
+        visible={gameOverRecord !== null}
+        transparent
+        animationType="fade"
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>🎉 Oyun Bitti!</Text>
+            <View style={styles.modalRow}>
+              <Text style={styles.modalLabel}>Toplam Puan</Text>
+              <Text style={styles.modalValue}>{gameOverRecord?.score ?? 0}</Text>
+            </View>
+            <View style={styles.modalRow}>
+              <Text style={styles.modalLabel}>Bulunan Kelime</Text>
+              <Text style={styles.modalValue}>{gameOverRecord?.wordCount ?? 0}</Text>
+            </View>
+            <View style={styles.modalRow}>
+              <Text style={styles.modalLabel}>En Uzun Kelime</Text>
+              <Text style={styles.modalValue}>
+                {gameOverRecord?.longestWord !== '-' ? `"${gameOverRecord?.longestWord}"` : '-'}
+              </Text>
+            </View>
+            <View style={styles.modalRow}>
+              <Text style={styles.modalLabel}>Süre</Text>
+              <Text style={styles.modalValue}>{gameOverRecord?.duration}</Text>
+            </View>
+            <Pressable
+              style={styles.primaryButton}
+              onPress={() => {
+                if (gameOverRecord) onFinish(gameOverRecord);
+              }}
+            >
+              <Text style={styles.primaryButtonText}>Skoru Kaydet →</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+      </>
     );
   } catch (err) {
     console.error('[GameScreen render error]:', err);
     return (
-      <View style={styles.menuCard}>
-        <Text style={styles.detailTitle}>Render Hatası</Text>
-        <Text style={styles.screenDescription}>{String(err)}</Text>
-        <Pressable style={styles.secondaryButton} onPress={onBack}>
-          <Text style={styles.secondaryButtonText}>Geri Dön</Text>
+      <>
+        <Pressable style={styles.topRightBackButton} onPress={onBack}>
+          <Text style={styles.topRightBackButtonText}>✕ Çık</Text>
         </Pressable>
-      </View>
+        <View style={styles.menuCard}>
+          <Text style={styles.detailTitle}>Render Hatası</Text>
+          <Text style={styles.screenDescription}>{String(err)}</Text>
+        </View>
+      </>
     );
   }
 }
 
-function StatBadge({ label, value }: { label: string; value: string }) {
+function StatBadge({ label, value, danger }: { label: string; value: string; danger?: boolean }) {
   return (
-    <View style={styles.statBadge}>
-      <Text style={styles.statBadgeValue}>{value}</Text>
+    <View style={[styles.statBadge, danger && styles.statBadgeDanger]}>
+      <Text style={[styles.statBadgeValue, danger && styles.statBadgeValueDanger]}>{value}</Text>
       <Text style={styles.statBadgeLabel}>{label}</Text>
     </View>
   );
@@ -1548,142 +1759,232 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#0B1020',
-    padding: 24,
-    gap: 16,
+    backgroundColor: '#0A0515',
+    padding: 20,
+    paddingTop: 80, // Üstteki badge ile çakışmayı önlemek için eklendi
+    gap: 14,
+  },
+  menuWrapper: {
+    alignItems: 'center',
+    gap: 14,
+    width: '100%',
+  },
+  logo: {
+    width: 120,
+    height: 120,
+    borderRadius: 30,
+    marginBottom: -10,
+    borderWidth: 2,
+    borderColor: '#7C3AED',
   },
   title: {
-    color: '#F8FAFC',
-    fontSize: 36,
-    fontWeight: '700',
+    color: '#FAF5FF',
+    fontSize: 40,
+    fontWeight: '800',
     textAlign: 'center',
+    letterSpacing: 2,
+    textShadowColor: '#A855F7',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 18,
   },
   subtitle: {
-    color: '#CBD5E1',
-    fontSize: 18,
+    color: '#C4B5FD',
+    fontSize: 17,
     textAlign: 'center',
+    fontWeight: '500',
   },
   caption: {
-    color: '#94A3B8',
-    fontSize: 14,
+    color: '#6D5A8A',
+    fontSize: 13,
     textAlign: 'center',
     maxWidth: 320,
   },
   input: {
     width: '100%',
     maxWidth: 320,
-    borderWidth: 1,
-    borderColor: '#334155',
+    borderWidth: 1.5,
+    borderColor: '#4C1D95',
     borderRadius: 16,
     paddingHorizontal: 16,
     paddingVertical: 14,
-    backgroundColor: '#111827',
-    color: '#F8FAFC',
+    backgroundColor: '#160B2E',
+    color: '#FAF5FF',
     fontSize: 16,
   },
   primaryButton: {
-    backgroundColor: '#F97316',
+    backgroundColor: '#7C3AED',
     paddingHorizontal: 24,
     paddingVertical: 14,
     borderRadius: 16,
+    shadowColor: '#A855F7',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.6,
+    shadowRadius: 12,
+    elevation: 10,
   },
   primaryButtonText: {
-    color: '#0B1020',
+    color: '#FAF5FF',
     fontSize: 16,
-    fontWeight: '700',
+    fontWeight: '800',
+    textAlign: 'center',
+    letterSpacing: 0.5,
   },
   nameBadge: {
     position: 'absolute',
     top: 56,
-    left: 24,
-    backgroundColor: '#111827',
-    borderWidth: 1,
-    borderColor: '#334155',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 14,
+    left: 16,
+    backgroundColor: '#160B2E',
+    borderWidth: 1.5,
+    borderColor: '#4C1D95',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
   },
   nameBadgeLabel: {
-    color: '#94A3B8',
-    fontSize: 12,
+    color: '#A78BFA',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
   },
   nameBadgeValue: {
-    color: '#F8FAFC',
-    fontSize: 16,
+    color: '#FAF5FF',
+    fontSize: 15,
     fontWeight: '700',
+  },
+  topRightBackButton: {
+    position: 'absolute',
+    top: 56,
+    right: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: '#160B2E',
+    borderWidth: 1.5,
+    borderColor: '#6D5A8A',
+    borderRadius: 16,
+    zIndex: 999,
+  },
+  topRightBackButtonText: {
+    color: '#FAF5FF',
+    fontSize: 15,
+    fontWeight: '800',
   },
   menuCard: {
     width: '100%',
     maxWidth: 320,
-    backgroundColor: '#111827',
+    backgroundColor: '#160B2E',
+    borderRadius: 24,
+    padding: 24,
+    borderWidth: 1.5,
+    borderColor: '#2D1B69',
+    shadowColor: '#7C3AED',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 24,
+    elevation: 14,
+    gap: 16,
+  },
+  foundWordsContainer: {
+    width: '100%',
+    paddingHorizontal: 20,
+    marginVertical: 10,
+  },
+  foundWordsTitle: {
+    color: '#C4B5FD',
+    fontSize: 12,
+    fontWeight: '600',
+    marginBottom: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  foundWordsScroll: {
+    flexDirection: 'row',
+  },
+  wordPill: {
+    backgroundColor: '#4C1D95',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
     borderRadius: 20,
-    padding: 20,
-    gap: 12,
+    marginRight: 8,
     borderWidth: 1,
-    borderColor: '#1F2937',
+    borderColor: '#7C3AED',
+  },
+  wordPillText: {
+    color: '#FAF5FF',
+    fontSize: 13,
+    fontWeight: '700',
   },
   menuTitle: {
-    color: '#F8FAFC',
-    fontSize: 20,
-    fontWeight: '700',
+    color: '#FAF5FF',
+    fontSize: 22,
+    fontWeight: '800',
     marginBottom: 4,
     textAlign: 'center',
+    letterSpacing: 0.5,
   },
   menuButton: {
-    backgroundColor: '#0F172A',
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#1E293B',
-    paddingVertical: 14,
+    backgroundColor: '#1E0B40',
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: '#3B1F7A',
+    paddingVertical: 16,
     paddingHorizontal: 14,
-    gap: 4,
   },
   detailCard: {
     width: '100%',
-    maxWidth: 340,
-    backgroundColor: '#111827',
-    borderRadius: 20,
+    maxWidth: 360,
+    backgroundColor: '#160B2E',
+    borderRadius: 24,
     padding: 20,
     gap: 14,
-    borderWidth: 1,
-    borderColor: '#1F2937',
+    borderWidth: 1.5,
+    borderColor: '#2D1B69',
+    shadowColor: '#7C3AED',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 24,
+    elevation: 14,
   },
   scrollContent: {
     gap: 14,
-    paddingBottom: 20,
+    paddingBottom: 24,
   },
   detailTitle: {
-    color: '#F8FAFC',
+    color: '#FAF5FF',
     fontSize: 22,
-    fontWeight: '700',
+    fontWeight: '800',
     textAlign: 'center',
+    letterSpacing: 0.5,
   },
   menuButtonText: {
-    color: '#CBD5E1',
+    color: '#DDD6FE',
     fontSize: 16,
     textAlign: 'center',
-    fontWeight: '600',
+    fontWeight: '700',
   },
   menuButtonSubtext: {
-    color: '#94A3B8',
+    color: '#6D5A8A',
     fontSize: 12,
     textAlign: 'center',
   },
   screenDescription: {
-    color: '#94A3B8',
+    color: '#A78BFA',
     fontSize: 14,
     textAlign: 'center',
     lineHeight: 20,
   },
   secondaryButton: {
-    backgroundColor: '#1E293B',
-    paddingVertical: 12,
-    borderRadius: 14,
+    backgroundColor: '#2D1B69',
+    paddingVertical: 13,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#4C1D95',
   },
   secondaryButtonText: {
-    color: '#F8FAFC',
+    color: '#DDD6FE',
     textAlign: 'center',
     fontWeight: '700',
+    fontSize: 15,
   },
   summaryGrid: {
     flexDirection: 'row',
@@ -1693,195 +1994,232 @@ const styles = StyleSheet.create({
   },
   summaryItem: {
     width: '48%',
-    backgroundColor: '#0F172A',
-    borderRadius: 14,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#1E293B',
+    backgroundColor: '#1E0B40',
+    borderRadius: 16,
+    padding: 14,
+    borderWidth: 1.5,
+    borderColor: '#3B1F7A',
+    alignItems: 'center',
   },
   summaryValue: {
-    color: '#F8FAFC',
-    fontSize: 18,
-    fontWeight: '700',
+    color: '#A855F7',
+    fontSize: 22,
+    fontWeight: '800',
     marginBottom: 4,
   },
   summaryLabel: {
-    color: '#94A3B8',
+    color: '#A78BFA',
     fontSize: 12,
+    fontWeight: '600',
+    textAlign: 'center',
   },
   historyList: {
     gap: 12,
   },
   historyCard: {
-    backgroundColor: '#0F172A',
-    borderRadius: 16,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: '#1E293B',
-    gap: 4,
+    backgroundColor: '#1E0B40',
+    borderRadius: 18,
+    padding: 16,
+    borderWidth: 1.5,
+    borderColor: '#3B1F7A',
+    gap: 5,
   },
   historyTitle: {
-    color: '#F8FAFC',
-    fontSize: 18,
-    fontWeight: '700',
+    color: '#DDD6FE',
+    fontSize: 17,
+    fontWeight: '800',
     marginBottom: 4,
   },
   historyLine: {
-    color: '#CBD5E1',
+    color: '#A78BFA',
     fontSize: 13,
   },
   gameCard: {
     width: '100%',
-    maxWidth: 380,
-    backgroundColor: '#111827',
-    borderRadius: 20,
-    padding: 18,
-    gap: 14,
-    borderWidth: 1,
-    borderColor: '#1F2937',
+    backgroundColor: '#0A0515',
+    flex: 1,
   },
   gameCardContent: {
-    paddingBottom: 20,
-    gap: 14,
+    paddingBottom: 24,
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    gap: 10,
+    alignItems: 'center',
   },
   gameHeader: {
     gap: 6,
   },
   gameStatsRow: {
     flexDirection: 'row',
-    gap: 10,
+    gap: 8,
     justifyContent: 'space-between',
+    width: '100%',
+    paddingHorizontal: 4,
   },
   statBadge: {
     flex: 1,
-    backgroundColor: '#0F172A',
+    backgroundColor: '#160B2E',
     borderRadius: 14,
     paddingVertical: 10,
-    paddingHorizontal: 10,
-    borderWidth: 1,
-    borderColor: '#1E293B',
+    paddingHorizontal: 8,
+    borderWidth: 1.5,
+    borderColor: '#2D1B69',
     alignItems: 'center',
   },
+  statBadgeDanger: {
+    backgroundColor: '#3B0000',
+    borderColor: '#B91C1C',
+  },
   statBadgeValue: {
-    color: '#F8FAFC',
-    fontSize: 18,
-    fontWeight: '700',
+    color: '#FAF5FF',
+    fontSize: 20,
+    fontWeight: '800',
+  },
+  statBadgeValueDanger: {
+    color: '#F87171',
   },
   statBadgeLabel: {
-    color: '#94A3B8',
-    fontSize: 12,
+    color: '#A78BFA',
+    fontSize: 11,
     marginTop: 2,
+    fontWeight: '600',
   },
   wordPreviewCard: {
-    backgroundColor: '#0F172A',
+    backgroundColor: '#1E0B40',
     borderRadius: 16,
-    borderWidth: 1,
-    borderColor: '#1E293B',
+    borderWidth: 1.5,
+    borderColor: '#3B1F7A',
     padding: 14,
     gap: 4,
   },
   wordPreviewLabel: {
-    color: '#94A3B8',
+    color: '#A78BFA',
     fontSize: 12,
+    fontWeight: '600',
   },
   wordPreviewValue: {
-    color: '#F8FAFC',
-    fontSize: 18,
-    fontWeight: '700',
-    letterSpacing: 1,
+    color: '#FAF5FF',
+    fontSize: 20,
+    fontWeight: '800',
+    letterSpacing: 2,
   },
   gridBoard: {
-    gap: 6,
+    position: 'relative',
   },
   gridRow: {
     flexDirection: 'row',
-    gap: 6,
+    gap: 3,
     justifyContent: 'center',
   },
   gridCell: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: '#1E293B',
+    borderRadius: 8,
+    backgroundColor: '#1A0840',
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#3B1F7A',
   },
   gridCellSelected: {
-    backgroundColor: '#F97316',
+    backgroundColor: '#7C3AED',
+    borderColor: '#A855F7',
+    shadowColor: '#A855F7',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.9,
+    shadowRadius: 8,
+    elevation: 10,
   },
   gridCellExploding: {
-    backgroundColor: '#EF4444',
-    transform: [{ scale: 1.15 }],
+    backgroundColor: '#EC4899',
+    borderColor: '#F9A8D4',
+    transform: [{ scale: 1.1 }],
     zIndex: 10,
     elevation: 10,
-    shadowColor: '#EF4444',
+    shadowColor: '#EC4899',
     shadowOpacity: 0.9,
     shadowRadius: 10,
   },
   gridCellText: {
-    color: '#F8FAFC',
-    fontSize: 15,
+    color: '#FAF5FF',
+    fontSize: 14,
+    fontWeight: '800',
+    lineHeight: 16,
+  },
+  gridCellScore: {
+    color: '#A78BFA',
+    fontSize: 8,
     fontWeight: '700',
+    lineHeight: 9,
   },
   gridCellPower: {
-    backgroundColor: '#8B5CF6',
+    backgroundColor: '#78350F',
     borderWidth: 2,
-    borderColor: '#A78BFA',
+    borderColor: '#F59E0B',
+    shadowColor: '#F59E0B',
+    shadowOpacity: 0.8,
+    shadowRadius: 6,
+    elevation: 8,
   },
   gridCellPowerText: {
     fontSize: 16,
     color: '#FCD34D',
   },
   gameMessage: {
-    color: '#CBD5E1',
+    color: '#C4B5FD',
     fontSize: 13,
     textAlign: 'center',
     lineHeight: 19,
+    paddingHorizontal: 8,
   },
   gameActionRow: {
     flexDirection: 'row',
     gap: 10,
+    width: '100%',
+    paddingHorizontal: 4,
   },
   jokerButtonsRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 8,
     justifyContent: 'center',
+    width: '100%',
+    paddingHorizontal: 4,
   },
   goldBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#0F172A',
+    backgroundColor: '#160B2E',
     borderRadius: 16,
     padding: 14,
-    borderWidth: 1,
-    borderColor: '#1E293B',
+    borderWidth: 1.5,
+    borderColor: '#2D1B69',
   },
   goldBannerLabel: {
-    color: '#94A3B8',
+    color: '#A78BFA',
     fontSize: 14,
+    fontWeight: '600',
   },
   goldBannerValue: {
     color: '#FBBF24',
-    fontSize: 22,
-    fontWeight: '700',
+    fontSize: 24,
+    fontWeight: '800',
   },
   disabledButton: {
-    backgroundColor: '#334155',
+    backgroundColor: '#2D1B69',
+    opacity: 0.5,
   },
   jokerContainer: {
-    backgroundColor: '#0F172A',
+    backgroundColor: '#1E0B40',
     borderRadius: 16,
     padding: 12,
-    borderWidth: 1,
-    borderColor: '#1E293B',
+    borderWidth: 1.5,
+    borderColor: '#3B1F7A',
     gap: 10,
   },
   jokerTitle: {
-    color: '#F8FAFC',
+    color: '#FAF5FF',
     fontSize: 14,
-    fontWeight: '700',
+    fontWeight: '800',
     textAlign: 'center',
   },
   jokerGrid: {
@@ -1891,40 +2229,93 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   jokerButton: {
-    width: '48%',
-    backgroundColor: '#1E293B',
-    borderRadius: 12,
-    padding: 8,
+    width: 48,
+    height: 48,
+    backgroundColor: '#1E0B40',
+    borderRadius: 14,
     alignItems: 'center',
-    gap: 4,
+    justifyContent: 'center',
     borderWidth: 2,
-    borderColor: '#334155',
+    borderColor: '#3B1F7A',
   },
   jokerButtonActive: {
-    backgroundColor: '#F97316',
-    borderColor: '#F97316',
+    backgroundColor: '#7C3AED',
+    borderColor: '#A855F7',
+    shadowColor: '#A855F7',
+    shadowOpacity: 0.8,
+    shadowRadius: 8,
+    elevation: 8,
   },
   jokerButtonDisabled: {
-    opacity: 0.4,
+    opacity: 0.35,
   },
   activeJokerButton: {
-    backgroundColor: '#F97316',
-    borderColor: '#F97316',
+    backgroundColor: '#7C3AED',
+    borderColor: '#A855F7',
   },
   jokerButtonText: {
-    color: '#F8FAFC',
-    fontSize: 11,
-    fontWeight: '600',
-    textAlign: 'center',
+    fontSize: 22,
   },
   jokerButtonCount: {
-    color: '#94A3B8',
-    fontSize: 12,
-    fontWeight: '700',
+    color: '#A78BFA',
+    fontSize: 10,
+    fontWeight: '800',
+    position: 'absolute',
+    bottom: 2,
+    right: 5,
   },
   jokerCount: {
-    color: '#94A3B8',
+    color: '#A78BFA',
     fontSize: 12,
     fontWeight: '700',
   },
+  // Oyun sonu modal
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(10,5,21,0.88)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 340,
+    backgroundColor: '#160B2E',
+    borderRadius: 28,
+    padding: 28,
+    gap: 16,
+    borderWidth: 2,
+    borderColor: '#7C3AED',
+    shadowColor: '#A855F7',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.6,
+    shadowRadius: 24,
+    elevation: 20,
+  },
+  modalTitle: {
+    color: '#FAF5FF',
+    fontSize: 28,
+    fontWeight: '800',
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  modalRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#2D1B69',
+  },
+  modalLabel: {
+    color: '#A78BFA',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  modalValue: {
+    color: '#FAF5FF',
+    fontSize: 18,
+    fontWeight: '800',
+  },
 });
+
