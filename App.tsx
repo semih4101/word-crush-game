@@ -1601,16 +1601,35 @@ function GameScreen({
                 explodingCellKeys.has(cellKey(cell)) && styles.gridCellExploding,
               ]}
             >
+              <Text style={styles.gridCellText}>{cell.letter}</Text>
+              <Text style={styles.gridCellScore}>{LETTER_POINTS[cell.letter] ?? 1}</Text>
               {cell.powerType ? (
-                <Text style={[styles.gridCellText, styles.gridCellPowerText]}>
-                  {POWER_SYMBOLS[cell.powerType]}
-                </Text>
-              ) : (
-                <>
-                  <Text style={styles.gridCellText}>{cell.letter}</Text>
-                  <Text style={styles.gridCellScore}>{LETTER_POINTS[cell.letter] ?? 1}</Text>
-                </>
-              )}
+                <View
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    right: 0,
+                    backgroundColor: '#7C3AED',
+                    borderRadius: 4,
+                    width: 13,
+                    height: 13,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                  pointerEvents="none"
+                >
+                  <Text
+                    style={{
+                      color: '#FFF',
+                      fontSize: 8,
+                      fontWeight: '900',
+                      lineHeight: 10,
+                    }}
+                  >
+                    {POWER_SYMBOLS[cell.powerType]}
+                  </Text>
+                </View>
+              ) : null}
             </View>
           ))}
           {floatingScores.map((score) => (
